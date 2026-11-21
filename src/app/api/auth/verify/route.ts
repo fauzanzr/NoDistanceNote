@@ -13,13 +13,23 @@ export async function POST(req: NextRequest) {
   const { code = "", pin } = (await req.json().catch(() => ({}))) as { code?: string; pin?: string };
   const c = String(code).trim();
 
-  let ok = false;
-  if (/^\d{6}$/.test(c)) ok = verifyPin(pin) && verifyTotp(c);
-  else if (/^[A-Za-z]{8}$/.test(c)) ok = await consumeOtk(c);
+  let status: "valid" | "expired" | "invalid" | "invalid_pin" = "invalid";
+  if (/^\d{6}$/.test(c)) {
+    if (!verifyPin(pin)) status = "invalid_pin";
+    else status = verifyTotp(c);
+  } else if (/^[A-Za-z]{8}$/.test(c)) {
+    status = await consumeOtk(c);
+  }
 
-  if (!ok) {
+  if (status !== "valid") {
     recordFail(ip);
-    return NextResponse.json({ error: "Invalid key" }, { status: 401 });
+    const error =
+      status === "expired"
+        ? "OTP code has expired. Please request a new one."
+        : status === "invalid_pin"
+        ? "Invalid Master PIN. Please try again."
+        : "Invalid OTP code. Please try again.";
+    return NextResponse.json({ error, reason: status }, { status: 401 });
   }
   clearFails(ip);
   await createSession();

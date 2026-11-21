@@ -4,12 +4,11 @@ import { store } from "@/lib/storage";
 import { detectDevice } from "@/lib/files";
 
 export const dynamic = "force-dynamic";
-const MAX = 1024 * 1024 * 1024; // 1 GB
 
 /**
  * Inisialisasi Direct Resumable Upload ke Google Drive.
  * Server hanya membuat session URL (beberapa byte), lalu browser mengunggah file langsung ke Google Drive
- * sehingga bebas dari batas 4,5 MB Vercel Serverless Function.
+ * (mendukung chunked resumable upload untuk file > 1 GB tanpa batas ukuran).
  */
 export async function POST(req: NextRequest) {
   const denied = await requireAuth();
@@ -18,7 +17,7 @@ export async function POST(req: NextRequest) {
   const rawName = String(b.name ?? "").trim();
   if (!rawName) return NextResponse.json({ error: "File name is required" }, { status: 400 });
   const size = Number(b.size ?? 0);
-  if (size > MAX) return NextResponse.json({ error: "File is too large (max 1 GB)" }, { status: 413 });
+  if (!Number.isFinite(size) || size < 0) return NextResponse.json({ error: "Invalid file size" }, { status: 400 });
   const name = rawName.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "_").slice(0, 200) || "file";
   const mime = String(b.mime || "application/octet-stream");
   const dev = detectDevice(req.headers.get("user-agent") ?? "");

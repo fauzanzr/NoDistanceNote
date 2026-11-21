@@ -8,6 +8,14 @@ export type StorageInfo = { mode: "drive" | "local"; account: string; path: stri
 export interface Store {
   listFiles(): Promise<FileMeta[]>;
   uploadFile(name: string, mime: string, data: Buffer, meta?: { device: string; os: string }): Promise<string>;
+  appendFileChunk?(
+    uploadId: string,
+    name: string,
+    chunk: Buffer,
+    offset: number,
+    totalSize: number,
+    meta?: { device: string; os: string }
+  ): Promise<{ done: boolean; id?: string }>;
   createUploadSession?(
     name: string, mime: string, size: number, origin: string, meta?: { device: string; os: string }
   ): Promise<string | null>;

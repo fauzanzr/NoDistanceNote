@@ -100,6 +100,28 @@ export const localStore: Store = {
     }
     return id;
   },
+  async appendFileChunk(uploadId, name, chunk, offset, totalSize, m) {
+    await init();
+    const safeUid = uploadId.replace(/[^\w\-]+/g, "").slice(0, 40) || "upload";
+    const clean = name.replace(/[^\w.\-]+/g, "_").slice(-120) || "file";
+    const tmpPath = path.join(TRASH, `.part-${safeUid}-${clean}`);
+    if (offset === 0) {
+      await fs.writeFile(tmpPath, chunk);
+    } else {
+      await fs.appendFile(tmpPath, chunk);
+    }
+    if (offset + chunk.length >= totalSize) {
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7).padEnd(5, "0")}-${clean}`;
+      await fs.rename(tmpPath, path.join(FILES, id));
+      if (m) {
+        const all = await readMeta();
+        all[id] = m;
+        await fs.writeFile(META, JSON.stringify(all));
+      }
+      return { done: true, id };
+    }
+    return { done: false };
+  },
   async getFile(id) {
     await init();
     try {

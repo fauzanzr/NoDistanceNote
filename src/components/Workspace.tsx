@@ -38,7 +38,7 @@ const stamp = (iso: string) => {
   return `${d.toLocaleDateString("en-US", { month: "short", day: "numeric" })} · ${d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}`;
 };
 
-export default function Workspace({ onLock }: { onLock: () => void }) {
+export default function Workspace({ onLock }: { onLock: (immediate?: boolean) => void }) {
   const [notes, setNotes] = useState<Note[]>([]);
   const [loading, setLoading] = useState(true);
   const [active, setActive] = useState<Active | null>(null);
@@ -61,6 +61,9 @@ export default function Workspace({ onLock }: { onLock: () => void }) {
   const search = useRef<HTMLInputElement>(null);
   const selectToken = useRef(0);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const suppressLockUntil = useRef(0);
+  const activeUploads = useRef(0);
+  const wipedRef = useRef(false);
 
   const showToast = useCallback((msg: string, kind: "ok" | "err" = "ok") => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -71,14 +74,16 @@ export default function Workspace({ onLock }: { onLock: () => void }) {
   const flashErr = useCallback((m: string) => showToast(m, "err"), [showToast]);
 
   // ---------- Quick Lock & Wipe ----------
-  const wipe = useCallback(async () => {
-    if (timer.current) clearTimeout(timer.current);
+  const wipe = useCallback(async (immediate = false) => {
+    if (wipedRef.current) return;
+    wipedRef.current = true;
+    if (timer.current) { clearTimeout(timer.current); timer.current = null; }
     cur.current = null;
     vault.current = {};
     setNotes([]); setActive(null);
     try { sessionStorage.clear(); } catch { /* ignore */ }
-    await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
-    onLock();
+    onLock(immediate);
+    await fetch("/api/auth/logout", { method: "POST", keepalive: true }).catch(() => {});
   }, [onLock]);
 
   const handleErr = useCallback((e: unknown) => {
@@ -95,11 +100,58 @@ export default function Workspace({ onLock }: { onLock: () => void }) {
 
   // ---------- Idle auto-lock (15 min) ----------
   useEffect(() => {
-    let t = setTimeout(wipe, IDLE_MS);
-    const reset = () => { clearTimeout(t); t = setTimeout(wipe, IDLE_MS); };
+    let t = setTimeout(() => void wipe(true), IDLE_MS);
+    const reset = () => { clearTimeout(t); t = setTimeout(() => void wipe(true), IDLE_MS); };
     const evs = ["mousemove", "keydown", "click", "touchstart", "scroll"];
     evs.forEach((e) => window.addEventListener(e, reset, { passive: true }));
     return () => { clearTimeout(t); evs.forEach((e) => window.removeEventListener(e, reset)); };
+  }, [wipe]);
+
+  // ---------- Auto-lock on browser / tab switch (visibilitychange & blur) ----------
+  useEffect(() => {
+    // Abaikan blur sementara saat dialog file picker OS atau link download dibuka
+    const onDocClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (target.tagName === "INPUT" && (target as HTMLInputElement).type === "file") {
+        suppressLockUntil.current = Date.now() + 60_000;
+      } else if (target.closest("a[download]")) {
+        suppressLockUntil.current = Date.now() + 3_000;
+      }
+    };
+    const onFocus = () => {
+      if (suppressLockUntil.current > Date.now()) {
+        suppressLockUntil.current = Date.now() + 1_200;
+      }
+    };
+    const triggerSwitchLock = () => {
+      if (Date.now() < suppressLockUntil.current) return;
+      if (activeUploads.current > 0) return;
+      if (timer.current !== null) {
+        void saveNow().finally(() => void wipe(true));
+        return;
+      }
+      void wipe(true);
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") triggerSwitchLock();
+    };
+    const onBlur = () => {
+      triggerSwitchLock();
+    };
+
+    document.addEventListener("click", onDocClick, true);
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", triggerSwitchLock);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      document.removeEventListener("click", onDocClick, true);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", triggerSwitchLock);
+      window.removeEventListener("blur", onBlur);
+    };
   }, [wipe]);
 
   // ---------- Ctrl/Cmd + K ----------
@@ -445,7 +497,7 @@ export default function Workspace({ onLock }: { onLock: () => void }) {
           )}
           <button className="btn" title="Light / Dark" onClick={toggleDark}>{dark ? <Sun size={16} /> : <Moon size={16} />}</button>
           <button
-            onClick={wipe}
+            onClick={() => void wipe(false)}
             title="Quick Lock & Wipe"
             className="ml-1 flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
           >
@@ -454,7 +506,13 @@ export default function Workspace({ onLock }: { onLock: () => void }) {
         </header>
 
         {view === "files" ? (
-          <FilesView onError={flashErr} onNotice={flash} onAuthLost={wipe} onImportNote={importNote} />
+          <FilesView
+            onError={flashErr}
+            onNotice={flash}
+            onAuthLost={() => void wipe(true)}
+            onImportNote={importNote}
+            onUploadingChange={(count) => { activeUploads.current = count; }}
+          />
         ) : opening ? (
           <div className="grid flex-1 place-items-center"><Spinner size={32} label="Opening note…" /></div>
         ) : !active ? (

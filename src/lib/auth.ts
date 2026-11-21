@@ -17,11 +17,19 @@ export const recordFail = (ip: string) => fails.set(ip, [...(fails.get(ip) ?? []
 export const clearFails = (ip: string) => fails.delete(ip);
 
 // ---- TOTP ----
-authenticator.options = { window: 1 };
-export function verifyTotp(code: string) {
+// window: [20, 1] => cek hingga 20 step (10 menit) ke belakang untuk mendeteksi kode TOTP yang baru saja kedaluwarsa
+authenticator.options = { window: [20, 1] };
+export function verifyTotp(code: string): "valid" | "expired" | "invalid" {
   const secret = process.env.TOTP_SECRET;
-  if (!secret) return false;
-  try { return authenticator.check(code, secret); } catch { return false; }
+  if (!secret) return "invalid";
+  try {
+    const delta = authenticator.checkDelta(code, secret);
+    if (delta === null) return "invalid";
+    if (delta >= -1 && delta <= 1) return "valid";
+    return "expired";
+  } catch {
+    return "invalid";
+  }
 }
 
 export function verifyPin(pin: string | undefined) {
@@ -35,6 +43,7 @@ export function verifyPin(pin: string | undefined) {
 // ---- One-Time Key: 8 huruf, berlaku 3 menit, sekali pakai ----
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ";
 const OTK_TTL = 3 * 60_000;
+const OTK_EXPIRED_KEEP_MS = 24 * 60 * 60_000; // simpan riwayat key kedaluwarsa 24 jam agar bisa beri pesan "expired"
 const hash = (s: string) => crypto.createHash("sha256").update(s).digest("hex");
 
 export async function createOtk() {
@@ -42,23 +51,27 @@ export async function createOtk() {
   for (let i = 0; i < 8; i++) code += ALPHABET[crypto.randomInt(ALPHABET.length)];
   const now = Date.now();
   const all = await store.readOtk();
-  for (const k of Object.keys(all)) if (all[k] < now) delete all[k];
+  for (const k of Object.keys(all)) if (now - all[k] > OTK_EXPIRED_KEEP_MS) delete all[k];
   all[hash(code)] = now + OTK_TTL;
   await store.writeOtk(all);
   return { code, expiresAt: now + OTK_TTL };
 }
 
-export async function consumeOtk(code: string) {
+export async function consumeOtk(code: string): Promise<"valid" | "expired" | "invalid"> {
   const now = Date.now();
   const all = await store.readOtk();
   const h = hash(code.toUpperCase());
   const exp = all[h];
-  for (const k of Object.keys(all)) if (all[k] < now) delete all[k];
-  if (exp && exp > now) {
-    delete all[h];
+  for (const k of Object.keys(all)) if (now - all[k] > OTK_EXPIRED_KEEP_MS) delete all[k];
+  if (exp !== undefined) {
+    if (exp > now) {
+      delete all[h];
+      await store.writeOtk(all);
+      return "valid";
+    }
     await store.writeOtk(all);
-    return true;
+    return "expired";
   }
   await store.writeOtk(all);
-  return false;
+  return "invalid";
 }

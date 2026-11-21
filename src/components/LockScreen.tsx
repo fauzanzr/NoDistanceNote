@@ -27,10 +27,7 @@ function Backdrop() {
   );
 }
 
-const WRONG = ["It's wrong, try again", " ", "Wèishéme?", "Please check the Code"];
-
 export default function LockScreen({ pinRequired, onUnlock }: { pinRequired: boolean; onUnlock: () => void }) {
-  const lastMsg = useRef("");
   const [code, setCode] = useState("");
   const [pin, setPin] = useState("");
   const [busy, setBusy] = useState(false);
@@ -56,21 +53,27 @@ export default function LockScreen({ pinRequired, onUnlock }: { pinRequired: boo
         setTimeout(onUnlock, 300);
         return;
       }
-      if (r.status === 429) setError((await r.json().catch(() => ({}))).error ?? "Too many attempts");
-      else if (r.status === 401) {
-        // Pesan salah bervariasi, tidak berulang berurutan
-        const pool = WRONG.filter((m) => m !== lastMsg.current);
-        const m = pool[Math.floor(Math.random() * pool.length)];
-        lastMsg.current = m;
-        setError(m);
-      } else setError("Sign-in failed");
+      const data = (await r.json().catch(() => ({}))) as { error?: string; reason?: string };
+      if (r.status === 429) {
+        setError(data.error?.trim() || "Too many attempts. Please wait and try again.");
+      } else if (r.status === 401) {
+        if (data.reason === "expired") {
+          setError("OTP code has expired. Please request a new one.");
+        } else if (data.reason === "invalid_pin") {
+          setError("Invalid Master PIN. Please try again.");
+        } else {
+          setError(data.error?.trim() || "Invalid OTP code. Please try again.");
+        }
+      } else {
+        setError(data.error?.trim() || "Sign-in failed. Please try again.");
+      }
       setFail((f) => f + 1);
       navigator.vibrate?.(200);
       setCode("");
       setBusy(false);
       setTimeout(() => ref.current?.focus(), 0);
     } catch {
-      setError("Network error");
+      setError("Network error. Please check your connection and try again.");
       setBusy(false);
     }
   }
@@ -123,9 +126,14 @@ export default function LockScreen({ pinRequired, onUnlock }: { pinRequired: boo
               disabled={busy}
             />
           </div>
-          {error && (
-            <p key={error + fail} className="anim-pop mx-auto flex w-fit items-center gap-1.5 rounded-md bg-red-500/10 px-3 py-1.5 text-sm font-medium text-red-500">
-              <AlertCircle size={15} /> {error}
+          {error.trim() && (
+            <p
+              key={error + fail}
+              role="alert"
+              className="anim-pop mx-auto flex w-fit items-center gap-1.5 rounded-md bg-red-500/10 px-3 py-1.5 text-left text-sm font-medium text-red-500"
+            >
+              <AlertCircle size={15} className="shrink-0" />
+              <span>{error}</span>
             </p>
           )}
           <button className="primary flex h-9 w-full items-center justify-center gap-2" disabled={busy || !code}>

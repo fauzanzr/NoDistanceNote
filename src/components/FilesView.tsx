@@ -32,6 +32,10 @@ const fmtFull = (iso: string) =>
   new Date(iso).toLocaleString("en-US", { dateStyle: "long", timeStyle: "medium" });
 
 const BIG_FILE = 500 * 1024 * 1024; // >= 500 MB perlu konfirmasi
+// Ukuran chunk untuk Resumable Upload: 32 MB (kelipatan 256 KB sesuai spesifikasi Google Drive Resumable Upload API)
+const DRIVE_CHUNK_SIZE = 32 * 1024 * 1024;
+const SERVER_CHUNK_SIZE = 16 * 1024 * 1024;
+const MAX_CHUNK_RETRIES = 3;
 const MAX_CHARS = 22;
 /** Nama tanpa ekstensi, dipotong dengan ellipsis bila terlalu panjang. */
 function shortName(name: string, max = MAX_CHARS) {
@@ -176,8 +180,14 @@ function RenameModal({
 }
 
 export default function FilesView({
-  onError, onNotice, onAuthLost, onImportNote,
-}: { onError: (m: string) => void; onNotice: (m: string) => void; onAuthLost: () => void; onImportNote: (title: string, text: string) => Promise<void> }) {
+  onError, onNotice, onAuthLost, onImportNote, onUploadingChange,
+}: {
+  onError: (m: string) => void;
+  onNotice: (m: string) => void;
+  onAuthLost: () => void;
+  onImportNote: (title: string, text: string) => Promise<void>;
+  onUploadingChange?: (activeCount: number) => void;
+}) {
   const [files, setFiles] = useState<FileItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploads, setUploads] = useState<Upload[]>([]);
@@ -193,6 +203,11 @@ export default function FilesView({
   const [storage, setStorage] = useState<StorageInfo | null>(null);
   const dragDepth = useRef(0);
   const input = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const activeCount = uploads.filter((u) => !u.error && u.progress < 100).length;
+    onUploadingChange?.(activeCount);
+  }, [uploads, onUploadingChange]);
 
   useEffect(() => {
     fetch("/api/files", { cache: "no-store" })
@@ -232,29 +247,177 @@ export default function FilesView({
       }, 450);
     };
 
-    const fallbackServerUpload = () => {
-      const xhr = new XMLHttpRequest();
-      xhr.open("POST", "/api/files");
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) patchUpload(key, { progress: Math.min(99, Math.round((e.loaded / e.total) * 100)) });
-      };
-      xhr.onload = () => {
-        if (xhr.status === 401) return onAuthLost();
-        if (xhr.status >= 200 && xhr.status < 300) {
-          finish(JSON.parse(xhr.responseText) as FileItem);
+    const fallbackServerUpload = async () => {
+      // Gunakan chunked upload ke /api/files agar file > 1 GB tidak terkena batas memori FormData/Buffer
+      const uploadId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const total = file.size;
+      const mime = file.type || "application/octet-stream";
+      let offset = 0;
+
+      while (offset < total || total === 0) {
+        const end = total === 0 ? 0 : Math.min(offset + SERVER_CHUNK_SIZE, total);
+        const chunk = file.slice(offset, end);
+
+        const res = await new Promise<{ status: number; text: string }>((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open("PUT", "/api/files");
+          xhr.setRequestHeader("Content-Type", "application/octet-stream");
+          xhr.setRequestHeader("x-upload-id", uploadId);
+          xhr.setRequestHeader("x-file-name", encodeURIComponent(file.name));
+          xhr.setRequestHeader("x-file-mime", mime);
+          xhr.setRequestHeader("x-chunk-offset", String(offset));
+          xhr.setRequestHeader("x-file-size", String(total));
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable && total > 0) {
+              const pct = Math.min(99, Math.round(((offset + e.loaded) / total) * 100));
+              patchUpload(key, { progress: pct });
+            }
+          };
+          xhr.onload = () => resolve({ status: xhr.status, text: xhr.responseText });
+          xhr.onerror = () => reject(new Error("Network error"));
+          xhr.send(chunk);
+        }).catch((err: unknown) => {
+          patchUpload(key, { error: err instanceof Error ? err.message : "Network error" });
+          return null;
+        });
+
+        if (!res) return;
+        if (res.status === 401) {
+          onAuthLost();
+          return;
+        }
+        if (res.status >= 200 && res.status < 300) {
+          let body: Record<string, unknown> = {};
+          try { body = JSON.parse(res.text || "{}"); } catch { /* ignore */ }
+          if (!body.partial) {
+            finish(body as unknown as FileItem);
+            return;
+          }
+          offset = end;
+          if (total === 0) break;
         } else {
           let msg = "Upload failed";
-          try { msg = JSON.parse(xhr.responseText).error ?? msg; } catch { /* ignore */ }
+          try { msg = JSON.parse(res.text).error ?? msg; } catch { /* ignore */ }
           patchUpload(key, { error: msg });
+          return;
         }
-      };
-      xhr.onerror = () => patchUpload(key, { error: "Network error" });
-      const fd = new FormData();
-      fd.append("file", file);
-      xhr.send(fd);
+      }
     };
 
-    // Coba Direct Resumable Upload ke Google Drive terlebih dahulu (lolos batas 4.5 MB Vercel)
+    const uploadToDriveResumable = async (sess: {
+      uploadUrl: string;
+      name?: string;
+      device?: string;
+      os?: string;
+    }) => {
+      const total = file.size;
+      const mime = file.type || "application/octet-stream";
+      let offset = 0;
+
+      // Query posisi byte terakhir yang diterima Google Drive saat terjadi gangguan jaringan
+      const queryResumeOffset = (): Promise<number | null> =>
+        new Promise((resolve) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open("PUT", sess.uploadUrl);
+          xhr.setRequestHeader("Content-Range", `bytes */${total}`);
+          xhr.onload = () => {
+            if (xhr.status === 308) {
+              const range = xhr.getResponseHeader("Range");
+              const m = range && /bytes=0-(\d+)/i.exec(range);
+              resolve(m ? parseInt(m[1], 10) + 1 : 0);
+            } else {
+              resolve(null);
+            }
+          };
+          xhr.onerror = () => resolve(null);
+          xhr.send();
+        });
+
+      while (offset < total || total === 0) {
+        const end = total === 0 ? 0 : Math.min(offset + DRIVE_CHUNK_SIZE, total);
+        const chunk = file.slice(offset, end);
+        let attempt = 0;
+        let chunkDone = false;
+
+        while (attempt < MAX_CHUNK_RETRIES && !chunkDone) {
+          attempt++;
+          const res = await new Promise<{ status: number; text: string; range: string | null }>((resolve) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open("PUT", sess.uploadUrl);
+            xhr.setRequestHeader("Content-Type", mime);
+            if (total > 0) {
+              xhr.setRequestHeader("Content-Range", `bytes ${offset}-${end - 1}/${total}`);
+            }
+            xhr.upload.onprogress = (e) => {
+              if (e.lengthComputable && total > 0) {
+                const pct = Math.min(99, Math.round(((offset + e.loaded) / total) * 100));
+                patchUpload(key, { progress: pct });
+              }
+            };
+            xhr.onload = () =>
+              resolve({
+                status: xhr.status,
+                text: xhr.responseText,
+                range: xhr.getResponseHeader("Range"),
+              });
+            xhr.onerror = () => resolve({ status: 0, text: "", range: null });
+            xhr.send(chunk);
+          });
+
+          if (res.status >= 200 && res.status < 300) {
+            let meta: Record<string, unknown> = {};
+            try { meta = JSON.parse(res.text || "{}"); } catch { /* ignore */ }
+            const appProps = (meta.appProperties ?? {}) as Record<string, string>;
+            finish({
+              id: String(meta.id ?? `${Date.now()}`),
+              name: String(meta.name ?? sess.name ?? file.name),
+              size: Number(meta.size ?? file.size),
+              mime: String(meta.mimeType ?? file.type ?? "application/octet-stream"),
+              createdAt: String(meta.createdTime ?? new Date().toISOString()),
+              device: appProps.device ?? sess.device,
+              os: appProps.os ?? sess.os,
+            });
+            return;
+          }
+
+          if (res.status === 308) {
+            // Chunk berhasil diterima oleh Google Drive, lanjutkan ke chunk berikutnya
+            const m = res.range && /bytes=0-(\d+)/i.exec(res.range);
+            offset = m ? parseInt(m[1], 10) + 1 : end;
+            patchUpload(key, { progress: Math.min(99, Math.round((offset / total) * 100)) });
+            chunkDone = true;
+            break;
+          }
+
+          // Jika gagal karena masalah jaringan sementara atau 5xx/429, coba resume
+          if ((res.status === 0 || res.status === 429 || res.status >= 500) && attempt < MAX_CHUNK_RETRIES) {
+            await new Promise((r) => setTimeout(r, 1000 * attempt));
+            if (total > 0) {
+              const resumed = await queryResumeOffset();
+              if (resumed !== null) {
+                offset = resumed;
+                chunkDone = true;
+                break;
+              }
+            }
+            continue;
+          }
+
+          patchUpload(key, {
+            error: res.status ? `Drive upload failed (${res.status})` : "Direct upload network error",
+          });
+          return;
+        }
+
+        if (!chunkDone) {
+          patchUpload(key, { error: "Upload interrupted after multiple retries" });
+          return;
+        }
+        if (total === 0) break;
+      }
+    };
+
+    // Coba Direct Resumable Upload ke Google Drive terlebih dahulu (lolos batas 4.5 MB Vercel & mendukung > 1 GB)
     fetch("/api/files/upload-session", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -271,35 +434,10 @@ export default function FilesView({
       .then((sess) => {
         if (!sess) return;
         if (sess.mode !== "direct" || !sess.uploadUrl) {
-          fallbackServerUpload();
+          void fallbackServerUpload();
           return;
         }
-        const xhr = new XMLHttpRequest();
-        xhr.open("PUT", sess.uploadUrl);
-        xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
-        xhr.upload.onprogress = (e) => {
-          if (e.lengthComputable) patchUpload(key, { progress: Math.min(99, Math.round((e.loaded / e.total) * 100)) });
-        };
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            let meta: Record<string, unknown> = {};
-            try { meta = JSON.parse(xhr.responseText || "{}"); } catch { /* ignore */ }
-            const appProps = (meta.appProperties ?? {}) as Record<string, string>;
-            finish({
-              id: String(meta.id ?? `${Date.now()}`),
-              name: String(meta.name ?? sess.name ?? file.name),
-              size: Number(meta.size ?? file.size),
-              mime: String(meta.mimeType ?? file.type ?? "application/octet-stream"),
-              createdAt: String(meta.createdTime ?? new Date().toISOString()),
-              device: appProps.device ?? sess.device,
-              os: appProps.os ?? sess.os,
-            });
-          } else {
-            patchUpload(key, { error: `Drive upload failed (${xhr.status})` });
-          }
-        };
-        xhr.onerror = () => patchUpload(key, { error: "Direct upload network error" });
-        xhr.send(file);
+        void uploadToDriveResumable(sess);
       })
       .catch((e) => {
         patchUpload(key, { error: e instanceof Error ? e.message : "Upload failed" });
@@ -433,7 +571,7 @@ export default function FilesView({
         >
           <CloudUpload size={26} className={`transition-transform duration-200 ${drag ? "-translate-y-1" : ""}`} />
           <span className="text-sm font-medium">{drag ? "Drop files to upload" : "Click to choose files, or drag & drop here"}</span>
-          <span className="text-xs text-zinc-400">Max 1 GB per file · files of 500 MB or more need confirmation</span>
+          <span className="text-xs text-zinc-400">No file size limit (resumable chunked upload) · files of 500 MB or more need confirmation</span>
         </button>
         <input ref={input} type="file" multiple hidden onChange={(e) => { pick(e.target.files); e.target.value = ""; }} />
 

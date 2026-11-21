@@ -20,8 +20,13 @@ export default function Home() {
     return () => clearTimeout(t.current);
   }, []);
 
-  // Quick Lock: loading screen di tengah dulu, lalu masuk ke halaman kode 6 digit
-  const lock = () => {
+  // Quick Lock: loading screen di tengah dulu (untuk klik manual), atau langsung masuk halaman kode 6 digit saat pindah tab/browser
+  const lock = (immediate = false) => {
+    clearTimeout(t.current);
+    if (immediate) {
+      setState("locked");
+      return;
+    }
     setState("locking");
     t.current = setTimeout(() => setState("locked"), 1100);
   };
