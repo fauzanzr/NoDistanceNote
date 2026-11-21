@@ -1,7 +1,39 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, KeyRound, NotebookPen } from "lucide-react";
+import { AlertCircle, Clock, KeyRound, LockKeyhole, NotebookPen, RefreshCw, ShieldAlert, X } from "lucide-react";
 import Spinner from "./Spinner";
+
+export type LockReason = "switch" | "idle" | "manual" | "expired" | null;
+
+const REASON_META: Record<
+  Exclude<LockReason, null>,
+  { title: string; desc: string; Icon: typeof LockKeyhole; tone: string }
+> = {
+  switch: {
+    title: "Session locked automatically",
+    desc: "You switched away from this tab or app. Unlock again to load the latest synced data.",
+    Icon: RefreshCw,
+    tone: "bg-accent/10 text-accent",
+  },
+  idle: {
+    title: "Locked due to inactivity",
+    desc: "Your session was automatically locked after 15 minutes of inactivity to protect your data.",
+    Icon: Clock,
+    tone: "bg-amber-500/10 text-amber-500",
+  },
+  manual: {
+    title: "Session locked",
+    desc: "Your workspace has been locked. Enter your security key to continue.",
+    Icon: LockKeyhole,
+    tone: "bg-zinc-200/80 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300",
+  },
+  expired: {
+    title: "Session expired",
+    desc: "Your security session has ended. Please verify again to continue.",
+    Icon: ShieldAlert,
+    tone: "bg-amber-500/10 text-amber-500",
+  },
+};
 
 // Cahaya lembut yang bergerak + titik-titik berkedip di latar belakang
 function Backdrop() {
@@ -27,16 +59,28 @@ function Backdrop() {
   );
 }
 
-export default function LockScreen({ pinRequired, onUnlock }: { pinRequired: boolean; onUnlock: () => void }) {
+export default function LockScreen({
+  pinRequired,
+  reason = null,
+  onUnlock,
+}: {
+  pinRequired: boolean;
+  reason?: LockReason;
+  onUnlock: () => void;
+}) {
   const [code, setCode] = useState("");
   const [pin, setPin] = useState("");
   const [busy, setBusy] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const [error, setError] = useState("");
   const [fail, setFail] = useState(0);
+  const [dismissed, setDismissed] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
 
-  useEffect(() => ref.current?.focus(), []);
+  useEffect(() => {
+    setDismissed(false);
+    ref.current?.focus();
+  }, [reason]);
 
   async function submit(c: string) {
     if (busy) return;
@@ -100,7 +144,33 @@ export default function LockScreen({ pinRequired, onUnlock }: { pinRequired: boo
         <h1 className="text-2xl font-semibold tracking-tight">NoDistanceNote</h1>
         <p className="mt-1 text-sm text-zinc-500">Enter your Dynamic Security Key</p>
 
-        <div key={fail} className={`mt-8 space-y-3 ${fail > 0 && error ? "anim-shake" : ""}`}>
+        {reason && !dismissed && (() => {
+          const { title, desc, Icon, tone } = REASON_META[reason];
+          return (
+            <div
+              role="status"
+              className="anim-pop mt-5 flex items-start gap-3 rounded-xl border border-zinc-200/80 bg-zinc-50/80 p-3 text-left backdrop-blur-md dark:border-zinc-800/90 dark:bg-zinc-900/70"
+            >
+              <div className={`mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-lg ${tone}`}>
+                <Icon size={15} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-semibold text-zinc-800 dark:text-zinc-100">{title}</p>
+                <p className="mt-0.5 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">{desc}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDismissed(true)}
+                title="Dismiss"
+                className="btn -mr-1 -mt-1 !h-6 !w-6 shrink-0"
+              >
+                <X size={13} />
+              </button>
+            </div>
+          );
+        })()}
+
+        <div key={fail} className={`${reason && !dismissed ? "mt-5" : "mt-8"} space-y-3 ${fail > 0 && error ? "anim-shake" : ""}`}>
           {pinRequired && (
             <input
               type="password"

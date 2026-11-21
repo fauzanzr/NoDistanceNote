@@ -10,6 +10,7 @@ import Editor from "./Editor";
 import { ConfirmModal, KeyModal, PassphraseModal } from "./Modals";
 import Spinner, { COPYRIGHT } from "./Spinner";
 import FilesView from "./FilesView";
+import type { LockReason } from "./LockScreen";
 import { FolderOpen, StickyNote } from "lucide-react";
 
 type Active = {
@@ -38,7 +39,7 @@ const stamp = (iso: string) => {
   return `${d.toLocaleDateString("en-US", { month: "short", day: "numeric" })} · ${d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}`;
 };
 
-export default function Workspace({ onLock }: { onLock: (immediate?: boolean) => void }) {
+export default function Workspace({ onLock }: { onLock: (immediate?: boolean, reason?: LockReason) => void }) {
   const [notes, setNotes] = useState<Note[]>([]);
   const [loading, setLoading] = useState(true);
   const [active, setActive] = useState<Active | null>(null);
@@ -74,7 +75,7 @@ export default function Workspace({ onLock }: { onLock: (immediate?: boolean) =>
   const flashErr = useCallback((m: string) => showToast(m, "err"), [showToast]);
 
   // ---------- Quick Lock & Wipe ----------
-  const wipe = useCallback(async (immediate = false) => {
+  const wipe = useCallback(async (immediate = false, reason: LockReason = "manual") => {
     if (wipedRef.current) return;
     wipedRef.current = true;
     if (timer.current) { clearTimeout(timer.current); timer.current = null; }
@@ -82,12 +83,12 @@ export default function Workspace({ onLock }: { onLock: (immediate?: boolean) =>
     vault.current = {};
     setNotes([]); setActive(null);
     try { sessionStorage.clear(); } catch { /* ignore */ }
-    onLock(immediate);
+    onLock(immediate, reason);
     await fetch("/api/auth/logout", { method: "POST", keepalive: true }).catch(() => {});
   }, [onLock]);
 
   const handleErr = useCallback((e: unknown) => {
-    if (e instanceof Error && e.message === "UNAUTH") void wipe();
+    if (e instanceof Error && e.message === "UNAUTH") void wipe(true, "expired");
     else flashErr(e instanceof Error ? e.message : "Something went wrong");
   }, [wipe, flashErr]);
 
@@ -135,10 +136,10 @@ export default function Workspace({ onLock }: { onLock: (immediate?: boolean) =>
           return;
         }
         if (timer.current !== null) {
-          void saveNow().finally(() => void wipe(true));
+          void saveNow().finally(() => void wipe(true, "idle"));
           return;
         }
-        void wipe(true);
+        void wipe(true, "idle");
       }, IDLE_MS);
     };
     schedule();
@@ -168,10 +169,10 @@ export default function Workspace({ onLock }: { onLock: (immediate?: boolean) =>
       if (Date.now() < suppressLockUntil.current) return;
       if (activeUploads.current > 0) return;
       if (timer.current !== null) {
-        void saveNow().finally(() => void wipe(true));
+        void saveNow().finally(() => void wipe(true, "switch"));
         return;
       }
-      void wipe(true);
+      void wipe(true, "switch");
     };
     const onVisibility = () => {
       if (document.visibilityState === "hidden") triggerSwitchLock();
@@ -512,7 +513,7 @@ export default function Workspace({ onLock }: { onLock: (immediate?: boolean) =>
           )}
           <button className="btn" title="Light / Dark" onClick={toggleDark}>{dark ? <Sun size={16} /> : <Moon size={16} />}</button>
           <button
-            onClick={() => void wipe(false)}
+            onClick={() => void wipe(false, "manual")}
             title="Quick Lock & Wipe"
             className="ml-1 flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
           >
@@ -524,7 +525,7 @@ export default function Workspace({ onLock }: { onLock: (immediate?: boolean) =>
           <FilesView
             onError={flashErr}
             onNotice={flash}
-            onAuthLost={() => void wipe(true)}
+            onAuthLost={() => void wipe(true, "expired")}
             onImportNote={importNote}
             onUploadingChange={(count) => { activeUploads.current = count; }}
           />
