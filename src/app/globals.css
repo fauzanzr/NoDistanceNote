@@ -1,0 +1,82 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body { height: 100%; }
+body { @apply bg-white text-[#37352f] antialiased dark:bg-zinc-950 dark:text-[#e6e6e4]; transition: background-color .15s, color .15s; }
+::selection { background: rgba(35, 131, 226, .25); }
+* { scrollbar-width: thin; scrollbar-color: rgba(128,128,128,.3) transparent; }
+
+@layer components {
+  .btn { @apply inline-flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 transition hover:bg-zinc-100 hover:text-[#37352f] disabled:opacity-30 disabled:hover:bg-transparent dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100; }
+  .btn-on { @apply !text-accent; }
+  .input { @apply w-full rounded-md border border-zinc-200 bg-white px-2.5 py-1.5 text-sm outline-none transition placeholder:text-zinc-400 focus:border-accent focus:ring-2 focus:ring-accent/20 dark:border-zinc-700 dark:bg-zinc-900; }
+  .primary { @apply rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition hover:bg-accent-dark disabled:opacity-50; }
+  .ghost { @apply rounded-md px-3 py-1.5 text-sm text-zinc-600 transition hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800; }
+}
+
+.prose { --tw-prose-body: #37352f; --tw-prose-headings: #37352f; --tw-prose-invert-body: #e6e6e4; --tw-prose-invert-headings: #f0f0ee; }
+.prose :where(code):not(pre code) { @apply rounded bg-zinc-100 px-1 py-0.5 text-[0.85em] font-normal text-[#eb5757] before:content-none after:content-none dark:bg-zinc-800; }
+.prose pre { @apply rounded-md bg-zinc-50 text-[#37352f] dark:bg-zinc-900 dark:text-zinc-200; }
+.prose img { @apply rounded-md; }
+.prose input[type="checkbox"] { @apply mr-2 accent-[#2383e2]; }
+.prose ul:has(input[type="checkbox"]) { @apply list-none pl-0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@keyframes slideRight { from { opacity: 0; transform: translateX(-24px); } to { opacity: 1; transform: none; } }
+@keyframes fadeOut { to { opacity: 0; transform: scale(.98); } }
+.anim-in { animation: fadeUp .5s cubic-bezier(.2,.7,.2,1) both; }
+.anim-side { animation: slideRight .55s cubic-bezier(.2,.7,.2,1) both; }
+.anim-out { animation: fadeOut .28s ease forwards; }
+
+.prose table { @apply my-4 w-full border-collapse text-sm; }
+.prose th, .prose td { @apply border border-zinc-200 px-3 py-1.5 text-left dark:border-zinc-700; }
+.prose thead th { @apply bg-zinc-50 font-medium dark:bg-zinc-900; }
+
+/* Lock screen background */
+.glow { position: absolute; border-radius: 9999px; filter: blur(90px); opacity: .35; will-change: transform; }
+.glow-a { width: 520px; height: 520px; left: 8%; top: 5%; background: #2383e2; animation: drift1 16s ease-in-out infinite; }
+.glow-b { width: 460px; height: 460px; right: 6%; bottom: 4%; background: #9065b0; animation: drift2 20s ease-in-out infinite; }
+.glow-c { width: 360px; height: 360px; left: 42%; top: 40%; background: #4dab9a; opacity: .22; animation: drift3 24s ease-in-out infinite; }
+:is(html:not(.dark)) .glow { opacity: .18; }
+@keyframes drift1 { 0%,100% { transform: translate(0,0) scale(1); } 50% { transform: translate(120px,80px) scale(1.15); } }
+@keyframes drift2 { 0%,100% { transform: translate(0,0) scale(1); } 50% { transform: translate(-140px,-60px) scale(1.1); } }
+@keyframes drift3 { 0%,100% { transform: translate(0,0) scale(1); } 50% { transform: translate(-80px,90px) scale(1.2); } }
+.bg-dot { position: absolute; width: 3px; height: 3px; border-radius: 9999px; background: #9b9a97; opacity: 0; animation: twinkle 4s ease-in-out infinite; }
+@keyframes twinkle { 0%,100% { opacity: 0; transform: scale(.6); } 50% { opacity: .7; transform: scale(1.4); } }
+@media (prefers-reduced-motion: reduce) { .glow, .bg-dot { animation: none; } .bg-dot { opacity: .3; } }
+
+/* Notion-like typography */
+body { font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Display", "Segoe UI", Helvetica, "Apple Color Emoji", Arial, sans-serif, "Segoe UI Emoji", "Segoe UI Symbol"; font-feature-settings: "liga" 1, "calt" 1; text-rendering: optimizeLegibility; }
+input, textarea, button { font-family: inherit; }
+.prose { font-size: 16px; line-height: 1.6; }
+.prose :where(h1, h2, h3) { font-weight: 600; letter-spacing: -0.01em; }
+
+/* Failed login */
+@keyframes shake { 0%,100% { transform: translateX(0); } 15% { transform: translateX(-10px); } 30% { transform: translateX(9px); } 45% { transform: translateX(-7px); } 60% { transform: translateX(5px); } 75% { transform: translateX(-3px); } }
+@keyframes pop { from { opacity: 0; transform: translateY(-6px) scale(.95); } to { opacity: 1; transform: none; } }
+@keyframes failFlash { 0% { opacity: 0; } 20% { opacity: 1; } 100% { opacity: 0; } }
+@keyframes ring { 0% { box-shadow: 0 0 0 0 rgba(235,87,87,.55); } 100% { box-shadow: 0 0 0 16px rgba(235,87,87,0); } }
+.anim-shake { animation: shake .55s cubic-bezier(.36,.07,.19,.97) both; }
+.anim-pop { animation: pop .35s cubic-bezier(.2,.9,.3,1.2) both; }
+.fail-flash { position: absolute; inset: 0; z-index: -10; pointer-events: none; background: radial-gradient(circle at 50% 50%, rgba(235,87,87,.22), transparent 60%); animation: failFlash 1.1s ease-out both; }
+.fail-ring { animation: ring .7s ease-out; }
+
+/* Button micro-interactions */
+.btn, .primary, .ghost { transition-property: background-color, color, transform, opacity; transition-duration: .15s; }
+.btn:active:not(:disabled), .primary:active:not(:disabled), .ghost:active:not(:disabled) { transform: scale(.94); }
+
+/* File cards */
+@keyframes sweep { 0% { transform: translateX(-100%); } 100% { transform: translateX(260%); } }
+.dl-sweep { animation: sweep 1s ease-in-out infinite; }
+.no-scrollbar-y { overscroll-behavior: contain; }
+
+/* Modal: backdrop memudar, dialog tetap opak (hanya bergeser/zoom) => tidak ada tembus pandang */
+@keyframes backdropIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modalPop { from { transform: translateY(10px) scale(.97); } to { transform: none; } }
+.modal-backdrop { animation: backdropIn .2s ease-out both; }
+.modal-pop { animation: modalPop .24s cubic-bezier(.2,.8,.2,1) both; }
+
+/* Top toast animation */
+@keyframes toastIn { from { opacity: 0; transform: translate(-50%, -10px) scale(.97); } to { opacity: 1; transform: translate(-50%, 0) scale(1); } }
+.toast-in { animation: toastIn .22s cubic-bezier(.2,.8,.2,1) both; }
