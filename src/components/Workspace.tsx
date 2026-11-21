@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Check, Copy, KeyRound, Lock, LockKeyhole, Menu, Moon, PanelLeftClose, Pin, PinOff,
-  Plus, Search, ShieldCheck, ShieldOff, Smartphone, Sun, Trash2, AlertCircle, NotebookPen,
+  Plus, Search, ShieldCheck, ShieldOff, Smartphone, Sun, Trash2, AlertCircle,
 } from "lucide-react";
 import { COLORS, type Note } from "@/lib/types";
 import { decryptText, encryptText } from "@/lib/crypto";
@@ -10,6 +10,7 @@ import Editor from "./Editor";
 import { ConfirmModal, KeyModal, PassphraseModal } from "./Modals";
 import Spinner, { COPYRIGHT } from "./Spinner";
 import FilesView from "./FilesView";
+import BrandIcon from "./BrandIcon";
 import type { LockReason } from "./LockScreen";
 import { FolderOpen, StickyNote } from "lucide-react";
 
@@ -20,6 +21,7 @@ type Active = {
 type Sync = "idle" | "pending" | "saving" | "saved" | "error";
 
 const IDLE_MS = 15 * 60_000;
+const AWAY_LOCK_MS = 8 * 60_000; // Paling lama 8 menit saat pindah tab/aplikasi sebelum otomatis logout
 const DEBOUNCE_MS = 1800;
 const OPEN_DELAY_MS = 450;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -55,6 +57,7 @@ export default function Workspace({ onLock }: { onLock: (immediate?: boolean, re
   const [dark, setDark] = useState(false);
   const [copied, setCopied] = useState(false);
   const [view, setView] = useState<"notes" | "files">("notes");
+  const [syncTick, setSyncTick] = useState(0);
 
   const cur = useRef<Active | null>(null);
   const vault = useRef<Record<string, string>>({});
@@ -65,6 +68,8 @@ export default function Workspace({ onLock }: { onLock: (immediate?: boolean, re
   const suppressLockUntil = useRef(0);
   const activeUploads = useRef(0);
   const wipedRef = useRef(false);
+  const awaySince = useRef<number | null>(null);
+  const awayTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showToast = useCallback((msg: string, kind: "ok" | "err" = "ok") => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -79,6 +84,8 @@ export default function Workspace({ onLock }: { onLock: (immediate?: boolean, re
     if (wipedRef.current) return;
     wipedRef.current = true;
     if (timer.current) { clearTimeout(timer.current); timer.current = null; }
+    if (awayTimer.current) { clearTimeout(awayTimer.current); awayTimer.current = null; }
+    awaySince.current = null;
     cur.current = null;
     vault.current = {};
     setNotes([]); setActive(null);
@@ -148,7 +155,7 @@ export default function Workspace({ onLock }: { onLock: (immediate?: boolean, re
     return () => { clearTimeout(t); evs.forEach((e) => window.removeEventListener(e, schedule)); };
   }, [wipe, saveNow]);
 
-  // ---------- Auto-lock on browser / tab switch (visibilitychange & blur) ----------
+  // ---------- Auto-sync saat kembali & auto-lock jika pindah tab/aplikasi > 8 menit ----------
   useEffect(() => {
     // Abaikan blur sementara saat dialog file picker OS atau link download dibuka
     const onDocClick = (e: MouseEvent) => {
@@ -160,40 +167,108 @@ export default function Workspace({ onLock }: { onLock: (immediate?: boolean, re
         suppressLockUntil.current = Date.now() + 3_000;
       }
     };
-    const onFocus = () => {
+
+    const syncFreshData = async () => {
+      try {
+        const fresh = await api<Note[]>("/api/notes");
+        setNotes(fresh);
+        // Jika sedang membuka catatan dan tidak ada edit lokal yang belum tersimpan, perbarui isinya jika berubah di perangkat lain
+        const a = cur.current;
+        if (a && timer.current === null) {
+          const latest = fresh.find((n) => n.id === a.id);
+          if (latest) {
+            let text = latest.body;
+            if (latest.encrypted) {
+              const p = vault.current[a.id];
+              if (p) {
+                try { text = await decryptText(latest.body, p); } catch { text = a.text; }
+              } else {
+                text = a.text;
+              }
+            }
+            if (
+              text !== a.text ||
+              latest.title !== a.title ||
+              latest.subtitle !== a.subtitle ||
+              latest.color !== a.color ||
+              latest.pinned !== a.pinned
+            ) {
+              const updated: Active = {
+                ...a,
+                title: latest.title,
+                subtitle: latest.subtitle,
+                color: latest.color,
+                pinned: latest.pinned,
+                encrypted: latest.encrypted,
+                text,
+              };
+              cur.current = updated;
+              setActive(updated);
+            }
+          }
+        }
+        setSyncTick((t) => t + 1);
+      } catch (e) {
+        handleErr(e);
+      }
+    };
+
+    const startAwayGrace = () => {
+      if (timer.current !== null) void saveNow();
+      if (Date.now() < suppressLockUntil.current) return;
+      if (activeUploads.current > 0) return;
+      if (awaySince.current === null) {
+        awaySince.current = Date.now();
+      }
+      if (!awayTimer.current) {
+        awayTimer.current = setTimeout(() => {
+          awayTimer.current = null;
+          if (activeUploads.current > 0) return;
+          void wipe(true, "switch");
+        }, AWAY_LOCK_MS);
+      }
+    };
+
+    const onReturn = () => {
       if (suppressLockUntil.current > Date.now()) {
         suppressLockUntil.current = Date.now() + 1_200;
       }
-    };
-    const triggerSwitchLock = () => {
-      if (Date.now() < suppressLockUntil.current) return;
-      if (activeUploads.current > 0) return;
-      if (timer.current !== null) {
-        void saveNow().finally(() => void wipe(true, "switch"));
-        return;
+      if (awayTimer.current) {
+        clearTimeout(awayTimer.current);
+        awayTimer.current = null;
       }
-      void wipe(true, "switch");
-    };
-    const onVisibility = () => {
-      if (document.visibilityState === "hidden") triggerSwitchLock();
-    };
-    const onBlur = () => {
-      triggerSwitchLock();
+      if (awaySince.current !== null) {
+        const elapsed = Date.now() - awaySince.current;
+        awaySince.current = null;
+        if (elapsed >= AWAY_LOCK_MS && activeUploads.current === 0) {
+          void wipe(true, "switch");
+          return;
+        }
+        // Kembali dalam < 8 menit => tetap login & sinkronkan data terbaru dari perangkat lain secara otomatis
+        void syncFreshData();
+      }
     };
 
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") startAwayGrace();
+      else onReturn();
+    };
+    const onBlur = () => startAwayGrace();
+
     document.addEventListener("click", onDocClick, true);
-    window.addEventListener("focus", onFocus);
+    window.addEventListener("focus", onReturn);
     document.addEventListener("visibilitychange", onVisibility);
-    window.addEventListener("pagehide", triggerSwitchLock);
+    window.addEventListener("pagehide", startAwayGrace);
     window.addEventListener("blur", onBlur);
     return () => {
+      if (awayTimer.current) { clearTimeout(awayTimer.current); awayTimer.current = null; }
       document.removeEventListener("click", onDocClick, true);
-      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("focus", onReturn);
       document.removeEventListener("visibilitychange", onVisibility);
-      window.removeEventListener("pagehide", triggerSwitchLock);
+      window.removeEventListener("pagehide", startAwayGrace);
       window.removeEventListener("blur", onBlur);
     };
-  }, [wipe, saveNow]);
+  }, [wipe, saveNow, handleErr]);
 
   // ---------- Ctrl/Cmd + K ----------
   useEffect(() => {
@@ -401,7 +476,7 @@ export default function Workspace({ onLock }: { onLock: (immediate?: boolean, re
       >
         <div className="anim-side flex h-full flex-col">
           <div className="flex items-center gap-2 px-4 pb-2 pt-4">
-            <div className="grid h-7 w-7 place-items-center rounded-md bg-zinc-200 text-[#37352f] dark:bg-zinc-800 dark:text-zinc-100"><NotebookPen size={15} /></div>
+            <div className="grid h-7 w-7 place-items-center rounded-md bg-zinc-200/70 dark:bg-zinc-800"><BrandIcon size={22} /></div>
             <span className="font-semibold tracking-tight">NoDistanceNote</span>
             <button className="btn ml-auto" title="Close sidebar" onClick={() => setOpen(false)}><PanelLeftClose size={16} /></button>
           </div>
@@ -528,13 +603,14 @@ export default function Workspace({ onLock }: { onLock: (immediate?: boolean, re
             onAuthLost={() => void wipe(true, "expired")}
             onImportNote={importNote}
             onUploadingChange={(count) => { activeUploads.current = count; }}
+            refreshTick={syncTick}
           />
         ) : opening ? (
           <div className="grid flex-1 place-items-center"><Spinner size={32} label="Opening note…" /></div>
         ) : !active ? (
           <div className="anim-in grid flex-1 place-items-center p-6 text-center">
             <div>
-              <div className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-xl bg-zinc-100 text-zinc-400 dark:bg-zinc-800"><NotebookPen size={26} /></div>
+              <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-2xl bg-zinc-100 dark:bg-zinc-800"><BrandIcon size={44} /></div>
               <h2 className="text-xl font-semibold">Welcome back</h2>
               <p className="mt-1 text-zinc-500">Choose a note from the sidebar, or create a new one.</p>
               <button onClick={create} className="primary mt-5 inline-flex items-center gap-2"><Plus size={16} /> New Note</button>

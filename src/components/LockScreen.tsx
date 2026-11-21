@@ -1,7 +1,8 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, Clock, KeyRound, LockKeyhole, NotebookPen, RefreshCw, ShieldAlert, X } from "lucide-react";
+import { AlertCircle, Clock, KeyRound, LockKeyhole, RefreshCw, ShieldAlert, X } from "lucide-react";
 import Spinner from "./Spinner";
+import BrandIcon from "./BrandIcon";
 
 export type LockReason = "switch" | "idle" | "manual" | "expired" | null;
 
@@ -11,7 +12,7 @@ const REASON_META: Record<
 > = {
   switch: {
     title: "Session locked automatically",
-    desc: "You switched away from this tab or app. Unlock again to load the latest synced data.",
+    desc: "You were away from this tab or app for more than 8 minutes. Unlock again to load the latest synced data.",
     Icon: RefreshCw,
     tone: "bg-accent/10 text-accent",
   },
@@ -138,8 +139,8 @@ export default function LockScreen({
         onSubmit={(e) => { e.preventDefault(); if (code) submit(code); }}
         className={`my-auto w-full max-w-sm text-center ${leaving ? "anim-out" : "anim-in"}`}
       >
-        <div className="mx-auto mb-5 grid h-14 w-14 place-items-center rounded-xl bg-zinc-100 text-[#37352f] dark:bg-zinc-800 dark:text-zinc-100">
-          <NotebookPen size={26} />
+        <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-2xl bg-zinc-100/80 shadow-sm dark:bg-zinc-800/80">
+          <BrandIcon size={46} />
         </div>
         <h1 className="text-2xl font-semibold tracking-tight">NoDistanceNote</h1>
         <p className="mt-1 text-sm text-zinc-500">Enter your Dynamic Security Key</p>

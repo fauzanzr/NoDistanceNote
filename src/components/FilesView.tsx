@@ -193,13 +193,14 @@ function RenameModal({
 }
 
 export default function FilesView({
-  onError, onNotice, onAuthLost, onImportNote, onUploadingChange,
+  onError, onNotice, onAuthLost, onImportNote, onUploadingChange, refreshTick = 0,
 }: {
   onError: (m: string) => void;
   onNotice: (m: string) => void;
   onAuthLost: () => void;
   onImportNote: (title: string, text: string) => Promise<void>;
   onUploadingChange?: (activeCount: number) => void;
+  refreshTick?: number;
 }) {
   const [files, setFiles] = useState<FileItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -232,7 +233,7 @@ export default function FilesView({
       .then((list: FileItem[]) => setFiles(list.map((f) => ({ ...f, uid: f.uid ?? f.id }))))
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, [onAuthLost]);
+  }, [onAuthLost, refreshTick]);
 
   const loadStorage = () => {
     if (storage) return;
