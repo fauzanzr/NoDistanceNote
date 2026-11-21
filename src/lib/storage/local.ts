@@ -1,5 +1,7 @@
+import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { Readable } from "node:stream";
 import type { Store } from "./types";
 
 // Mode pengembangan lokal: meniru struktur Drive (notes/, assets/) di folder .data
@@ -121,6 +123,39 @@ export const localStore: Store = {
       return { done: true, id };
     }
     return { done: false };
+  },
+  async getDownloadSession(id) {
+    await init();
+    try {
+      const full = path.join(FILES, safe(id));
+      const st = await fs.stat(full);
+      return {
+        mode: "server" as const,
+        url: `/api/files/${encodeURIComponent(id)}`,
+        name: id.replace(/^\d+-[a-z0-9]{5}-/, ""),
+        size: st.size,
+        mime: "application/octet-stream",
+      };
+    } catch {
+      return null;
+    }
+  },
+  async getFileStream(id) {
+    await init();
+    try {
+      const full = path.join(FILES, safe(id));
+      const st = await fs.stat(full);
+      const nodeStream = createReadStream(full);
+      const stream = Readable.toWeb(nodeStream) as unknown as ReadableStream<Uint8Array>;
+      return {
+        stream,
+        name: id.replace(/^\d+-[a-z0-9]{5}-/, ""),
+        size: st.size,
+        mime: "application/octet-stream",
+      };
+    } catch {
+      return null;
+    }
   },
   async getFile(id) {
     await init();

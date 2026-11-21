@@ -9,6 +9,40 @@ type Ctx = { params: { id: string } };
 export async function GET(req: NextRequest, { params }: Ctx) {
   const denied = await requireAuth();
   if (denied) return denied;
+
+  // Inisialisasi sesi Direct Download (agar browser bisa mengunduh langsung dari Google Drive + menampilkan progress & Mbps)
+  if (req.nextUrl.searchParams.get("session") === "1") {
+    if (store.getDownloadSession) {
+      const sess = await store.getDownloadSession(params.id).catch(() => null);
+      if (!sess) return NextResponse.json({ error: "Not found" }, { status: 404 });
+      return NextResponse.json(sess);
+    }
+    const f = await store.getFile(params.id).catch(() => null);
+    if (!f) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    return NextResponse.json({
+      mode: "server",
+      url: `/api/files/${encodeURIComponent(params.id)}`,
+      name: f.name,
+      size: f.data.length,
+      mime: f.mime,
+    });
+  }
+
+  // Untuk unduhan biasa (non-inline), gunakan stream bila tersedia agar file > 1 GB tidak memenuhi RAM Node.js
+  if (req.nextUrl.searchParams.get("inline") !== "1" && store.getFileStream) {
+    const sf = await store.getFileStream(params.id).catch(() => null);
+    if (!sf) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    return new NextResponse(sf.stream, {
+      headers: {
+        "Content-Type": sf.mime || "application/octet-stream",
+        "Content-Length": String(sf.size),
+        "Content-Disposition": attachment(sf.name),
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+      },
+    });
+  }
+
   const f = await store.getFile(params.id).catch(() => null);
   if (!f) return NextResponse.json({ error: "Not found" }, { status: 404 });
 

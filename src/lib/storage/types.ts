@@ -4,6 +4,14 @@ export type FileMeta = {
   device?: string; os?: string;
 };
 export type StorageInfo = { mode: "drive" | "local"; account: string; path: string };
+export type DownloadSession = {
+  mode: "direct" | "server";
+  url: string;
+  token?: string;
+  name: string;
+  size: number;
+  mime: string;
+};
 
 export interface Store {
   listFiles(): Promise<FileMeta[]>;
@@ -19,6 +27,8 @@ export interface Store {
   createUploadSession?(
     name: string, mime: string, size: number, origin: string, meta?: { device: string; os: string }
   ): Promise<string | null>;
+  getDownloadSession?(id: string): Promise<DownloadSession | null>;
+  getFileStream?(id: string): Promise<{ stream: ReadableStream<Uint8Array>; name: string; size: number; mime: string } | null>;
   storageInfo(): Promise<StorageInfo>;
   getFile(id: string): Promise<{ data: Buffer; name: string; mime: string } | null>;
   deleteFile(id: string): Promise<void>;

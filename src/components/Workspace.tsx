@@ -87,9 +87,34 @@ export default function Workspace({ onLock }: { onLock: (immediate?: boolean) =>
   }, [onLock]);
 
   const handleErr = useCallback((e: unknown) => {
-    if (e instanceof Error && e.message === "UNAUTH") wipe();
+    if (e instanceof Error && e.message === "UNAUTH") void wipe();
     else flashErr(e instanceof Error ? e.message : "Something went wrong");
   }, [wipe, flashErr]);
+
+  // ---------- Save ----------
+  const saveNow = useCallback(async () => {
+    if (timer.current) { clearTimeout(timer.current); timer.current = null; }
+    const a = cur.current;
+    if (!a) return;
+    try {
+      setSync("saving");
+      let content = a.text;
+      if (a.encrypted) {
+        const p = vault.current[a.id];
+        if (!p) return;
+        content = await encryptText(a.text, p);
+      }
+      const saved = await api<Note>(`/api/notes/${a.id}`, json("PUT", {
+        title: a.title, subtitle: a.subtitle, color: a.color,
+        content, pinned: a.pinned, encrypted: a.encrypted,
+      }));
+      setNotes((l) => l.map((n) => (n.id === a.id ? saved : n)));
+      if (!timer.current) setSync("saved");
+    } catch (e) {
+      setSync("error");
+      handleErr(e);
+    }
+  }, [handleErr]);
 
   // ---------- Init: sidebar first, no note auto-opened ----------
   useEffect(() => {
@@ -98,14 +123,29 @@ export default function Workspace({ onLock }: { onLock: (immediate?: boolean) =>
     api<Note[]>("/api/notes").then(setNotes).catch(handleErr).finally(() => setLoading(false));
   }, [handleErr]);
 
-  // ---------- Idle auto-lock (15 min) ----------
+  // ---------- Idle auto-lock (15 min), ditunda otomatis bila sedang ada upload/download berjalan ----------
   useEffect(() => {
-    let t = setTimeout(() => void wipe(true), IDLE_MS);
-    const reset = () => { clearTimeout(t); t = setTimeout(() => void wipe(true), IDLE_MS); };
+    let t: ReturnType<typeof setTimeout>;
+    const schedule = () => {
+      clearTimeout(t);
+      t = setTimeout(() => {
+        if (activeUploads.current > 0) {
+          // Masih ada proses upload / download yang aktif => tunda auto-lock dan jadwalkan ulang
+          schedule();
+          return;
+        }
+        if (timer.current !== null) {
+          void saveNow().finally(() => void wipe(true));
+          return;
+        }
+        void wipe(true);
+      }, IDLE_MS);
+    };
+    schedule();
     const evs = ["mousemove", "keydown", "click", "touchstart", "scroll"];
-    evs.forEach((e) => window.addEventListener(e, reset, { passive: true }));
-    return () => { clearTimeout(t); evs.forEach((e) => window.removeEventListener(e, reset)); };
-  }, [wipe]);
+    evs.forEach((e) => window.addEventListener(e, schedule, { passive: true }));
+    return () => { clearTimeout(t); evs.forEach((e) => window.removeEventListener(e, schedule)); };
+  }, [wipe, saveNow]);
 
   // ---------- Auto-lock on browser / tab switch (visibilitychange & blur) ----------
   useEffect(() => {
@@ -152,7 +192,7 @@ export default function Workspace({ onLock }: { onLock: (immediate?: boolean) =>
       window.removeEventListener("pagehide", triggerSwitchLock);
       window.removeEventListener("blur", onBlur);
     };
-  }, [wipe]);
+  }, [wipe, saveNow]);
 
   // ---------- Ctrl/Cmd + K ----------
   useEffect(() => {
@@ -166,31 +206,6 @@ export default function Workspace({ onLock }: { onLock: (immediate?: boolean) =>
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
   }, []);
-
-  // ---------- Save ----------
-  const saveNow = useCallback(async () => {
-    if (timer.current) { clearTimeout(timer.current); timer.current = null; }
-    const a = cur.current;
-    if (!a) return;
-    try {
-      setSync("saving");
-      let content = a.text;
-      if (a.encrypted) {
-        const p = vault.current[a.id];
-        if (!p) return;
-        content = await encryptText(a.text, p);
-      }
-      const saved = await api<Note>(`/api/notes/${a.id}`, json("PUT", {
-        title: a.title, subtitle: a.subtitle, color: a.color,
-        content, pinned: a.pinned, encrypted: a.encrypted,
-      }));
-      setNotes((l) => l.map((n) => (n.id === a.id ? saved : n)));
-      if (!timer.current) setSync("saved");
-    } catch (e) {
-      setSync("error");
-      handleErr(e);
-    }
-  }, [handleErr]);
 
   const edit = (patch: Partial<Active>, immediate = false) => {
     if (!cur.current) return;

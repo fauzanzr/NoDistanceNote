@@ -13,7 +13,8 @@ type FileItem = {
   id: string; name: string; size: number; mime: string; createdAt: string;
   device?: string; os?: string; uid?: string;
 };
-type Upload = { key: string; name: string; size: number; progress: number; error?: string };
+type Upload = { key: string; name: string; size: number; progress: number; speedBps: number; error?: string };
+type DownloadState = { progress: number; speedBps: number; abort: () => void };
 type StorageInfo = { mode: "drive" | "local"; account: string; path: string };
 type Kind = { label: string; Icon: LucideIcon; color: string };
 
@@ -23,6 +24,18 @@ const fmtSize = (b: number) => {
   let i = -1;
   do { b /= 1024; i++; } while (b >= 1024 && i < u.length - 1);
   return `${b.toFixed(b < 10 ? 1 : 0)} ${u[i]}`;
+};
+/** Format kecepatan transfer menjadi Mbps & MB/s (atau Kbps & KB/s bila di bawah 1 Mbps). */
+const fmtSpeed = (bps: number) => {
+  if (!Number.isFinite(bps) || bps <= 0) return "Calculating…";
+  const mbps = (bps * 8) / 1_000_000;
+  const mbs = bps / (1024 * 1024);
+  if (mbps >= 1) {
+    return `${mbps.toFixed(mbps < 10 ? 1 : 0)} Mbps · ${mbs.toFixed(mbs < 10 ? 1 : 0)} MB/s`;
+  }
+  const kbps = Math.max(1, Math.round((bps * 8) / 1_000));
+  const kbs = Math.max(1, Math.round(bps / 1024));
+  return `${kbps} Kbps · ${kbs} KB/s`;
 };
 const fmtShort = (iso: string) => {
   const d = new Date(iso);
@@ -191,9 +204,9 @@ export default function FilesView({
   const [files, setFiles] = useState<FileItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploads, setUploads] = useState<Upload[]>([]);
+  const [downloads, setDownloads] = useState<Record<string, DownloadState>>({});
   const [removing, setRemoving] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [started, setStarted] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const [drag, setDrag] = useState(false);
   const [detail, setDetail] = useState<FileItem | null>(null);
@@ -205,9 +218,10 @@ export default function FilesView({
   const input = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const activeCount = uploads.filter((u) => !u.error && u.progress < 100).length;
-    onUploadingChange?.(activeCount);
-  }, [uploads, onUploadingChange]);
+    const activeUploadCount = uploads.filter((u) => !u.error && u.progress < 100).length;
+    const activeDownloadCount = Object.keys(downloads).length;
+    onUploadingChange?.(activeUploadCount + activeDownloadCount);
+  }, [uploads, downloads, onUploadingChange]);
 
   useEffect(() => {
     fetch("/api/files", { cache: "no-store" })
@@ -237,7 +251,24 @@ export default function FilesView({
 
   const upload = useCallback((file: File) => {
     const key = `${Date.now()}-${Math.random()}`;
-    setUploads((u) => [{ key, name: file.name, size: file.size, progress: 0 }, ...u]);
+    setUploads((u) => [{ key, name: file.name, size: file.size, progress: 0, speedBps: 0 }, ...u]);
+
+    // Tracker kecepatan upload real-time (exponential moving average) lintas chunk
+    let lastTime = performance.now();
+    let lastBytes = 0;
+    let emaBps = 0;
+    const updateProgress = (loadedBytes: number, totalBytes: number) => {
+      const now = performance.now();
+      const dt = (now - lastTime) / 1000;
+      if (dt >= 0.2) {
+        const inst = Math.max(0, (loadedBytes - lastBytes) / dt);
+        emaBps = emaBps === 0 ? inst : emaBps * 0.6 + inst * 0.4;
+        lastTime = now;
+        lastBytes = loadedBytes;
+      }
+      const pct = totalBytes > 0 ? Math.min(99, Math.round((loadedBytes / totalBytes) * 100)) : 99;
+      patchUpload(key, { progress: pct, speedBps: Math.round(emaBps) });
+    };
 
     const finish = (item: FileItem) => {
       patchUpload(key, { progress: 100 });
@@ -269,8 +300,7 @@ export default function FilesView({
           xhr.setRequestHeader("x-file-size", String(total));
           xhr.upload.onprogress = (e) => {
             if (e.lengthComputable && total > 0) {
-              const pct = Math.min(99, Math.round(((offset + e.loaded) / total) * 100));
-              patchUpload(key, { progress: pct });
+              updateProgress(offset + e.loaded, total);
             }
           };
           xhr.onload = () => resolve({ status: xhr.status, text: xhr.responseText });
@@ -350,8 +380,7 @@ export default function FilesView({
             }
             xhr.upload.onprogress = (e) => {
               if (e.lengthComputable && total > 0) {
-                const pct = Math.min(99, Math.round(((offset + e.loaded) / total) * 100));
-                patchUpload(key, { progress: pct });
+                updateProgress(offset + e.loaded, total);
               }
             };
             xhr.onload = () =>
@@ -384,7 +413,7 @@ export default function FilesView({
             // Chunk berhasil diterima oleh Google Drive, lanjutkan ke chunk berikutnya
             const m = res.range && /bytes=0-(\d+)/i.exec(res.range);
             offset = m ? parseInt(m[1], 10) + 1 : end;
-            patchUpload(key, { progress: Math.min(99, Math.round((offset / total) * 100)) });
+            updateProgress(offset, total);
             chunkDone = true;
             break;
           }
@@ -451,12 +480,117 @@ export default function FilesView({
     if (big.length) { loadStorage(); setPending(big); }
   };
 
-  // Unduhan memakai link/anchor biasa (Content-Disposition: attachment) agar terdeteksi browser & IDM.
-  const markStarted = (id: string) => {
-    setStarted((s) => new Set(s).add(id));
-    onNotice("Download started — check your browser or download manager");
-    setTimeout(() => setStarted((s) => { const n = new Set(s); n.delete(id); return n; }), 1800);
-  };
+  // Direct Download dari Google Drive (atau streaming server) dengan progress bar (%) & kecepatan (Mbps)
+  const downloadFile = useCallback(async (f: FileItem) => {
+    if (downloads[f.id]) return;
+    const ctrl = new AbortController();
+    const removeDl = () =>
+      setDownloads((d) => {
+        const next = { ...d };
+        delete next[f.id];
+        return next;
+      });
+
+    setDownloads((d) => ({
+      ...d,
+      [f.id]: { progress: 0, speedBps: 0, abort: () => ctrl.abort() },
+    }));
+
+    try {
+      const sessRes = await fetch(`/api/files/${encodeURIComponent(f.id)}?session=1`, {
+        cache: "no-store",
+        signal: ctrl.signal,
+      });
+      if (sessRes.status === 401) {
+        removeDl();
+        onAuthLost();
+        return;
+      }
+      if (!sessRes.ok) throw new Error("Failed to start download");
+      const sess = (await sessRes.json()) as {
+        mode: "direct" | "server";
+        url: string;
+        token?: string;
+        name: string;
+        size: number;
+        mime: string;
+      };
+
+      const res = await fetch(sess.url, {
+        headers: sess.token ? { Authorization: `Bearer ${sess.token}` } : undefined,
+        signal: ctrl.signal,
+      });
+      if (!res.ok || !res.body) throw new Error(`Download failed (${res.status})`);
+
+      const total = Number(res.headers.get("Content-Length") || sess.size || f.size || 0);
+      const reader = res.body.getReader();
+      const blobParts: BlobPart[] = [];
+      let ramChunks: Uint8Array[] = [];
+      let ramBytes = 0;
+      let loaded = 0;
+      let lastTime = performance.now();
+      let lastBytes = 0;
+      let emaBps = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          ramChunks.push(value);
+          ramBytes += value.byteLength;
+          loaded += value.byteLength;
+
+          // Konsolidasi setiap 16 MB menjadi Blob agar browser memindahkan buffer dari JS heap ke disk cache
+          if (ramBytes >= 16 * 1024 * 1024) {
+            blobParts.push(new Blob(ramChunks as BlobPart[]));
+            ramChunks = [];
+            ramBytes = 0;
+          }
+
+          const now = performance.now();
+          const dt = (now - lastTime) / 1000;
+          if (dt >= 0.2) {
+            const inst = Math.max(0, (loaded - lastBytes) / dt);
+            emaBps = emaBps === 0 ? inst : emaBps * 0.6 + inst * 0.4;
+            lastTime = now;
+            lastBytes = loaded;
+            const pct = total > 0 ? Math.min(99, Math.round((loaded / total) * 100)) : 50;
+            setDownloads((d) =>
+              d[f.id] ? { ...d, [f.id]: { ...d[f.id], progress: pct, speedBps: Math.round(emaBps) } } : d
+            );
+          }
+        }
+      }
+
+      if (ramChunks.length > 0) {
+        blobParts.push(new Blob(ramChunks as BlobPart[]));
+        ramChunks = [];
+      }
+
+      setDownloads((d) =>
+        d[f.id] ? { ...d, [f.id]: { ...d[f.id], progress: 100, speedBps: Math.round(emaBps) } } : d
+      );
+
+      const finalBlob = new Blob(blobParts, { type: sess.mime || "application/octet-stream" });
+      const blobUrl = URL.createObjectURL(finalBlob);
+      const a = document.createElement("a");
+      a.href = blobUrl;
+      a.download = sess.name || f.name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+      setTimeout(removeDl, 500);
+      onNotice(`Downloaded “${sess.name || f.name}”`);
+    } catch (e) {
+      removeDl();
+      if (ctrl.signal.aborted) {
+        onNotice("Download canceled");
+        return;
+      }
+      onError(e instanceof Error ? e.message : "Download failed");
+    }
+  }, [downloads, onAuthLost, onError, onNotice]);
 
   function removeMany(list: FileItem[]) {
     if (!list.length) return;
@@ -634,7 +768,8 @@ export default function FilesView({
                     <div className="h-1.5 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
                       <div className="h-full rounded-full bg-accent transition-[width] duration-200" style={{ width: `${u.progress}%` }} />
                     </div>
-                    <p className="mt-1.5 text-center text-xs tabular-nums text-zinc-500">Uploading {u.progress}%</p>
+                    <p className="mt-1.5 text-center text-xs font-medium tabular-nums text-zinc-600 dark:text-zinc-300">Uploading {u.progress}%</p>
+                    <p className="mt-0.5 truncate text-center text-[11px] tabular-nums text-zinc-400">{fmtSpeed(u.speedBps)}</p>
                   </div>
                 )}
               </div>
@@ -645,6 +780,7 @@ export default function FilesView({
             {shown.map((f) => {
               const kind = kindOf(f.name, f.mime);
               const sel = selected.has(f.id);
+              const dl = downloads[f.id];
               return (
                 <div
                   key={f.uid ?? f.id}
@@ -669,28 +805,44 @@ export default function FilesView({
                   <div className="w-full text-center">
                     <p className="truncate text-sm font-medium" title={f.name}>{shortName(f.name)}</p>
                     <p className="mt-1 text-xs text-zinc-400">{fmtSize(f.size)}</p>
-                    <p className="text-[11px] text-zinc-400">{fmtShort(f.createdAt)}</p>
+                    {!dl && <p className="text-[11px] text-zinc-400">{fmtShort(f.createdAt)}</p>}
                   </div>
-                  <div className="mt-auto flex items-center gap-1">
-                    <a
-                      href={`/api/files/${encodeURIComponent(f.id)}`}
-                      download={f.name}
-                      onClick={() => markStarted(f.id)}
-                      title="Download"
-                      className="btn"
-                    >
-                      <Download size={16} />
-                    </a>
-                    <button className="btn" title="Details" onClick={() => openDetail(f)}><Info size={16} /></button>
-                    <button className="btn" title="Rename" onClick={() => setRenaming(f)}><Pencil size={16} /></button>
-                    {isText(f.name) && (
-                      <button className="btn" title="Save to Notes" onClick={() => importToNotes(f)}><NotebookPen size={16} /></button>
-                    )}
-                    <button className="btn hover:!text-red-500" title="Delete" onClick={() => removeMany([f])}><Trash2 size={16} /></button>
-                  </div>
-                  {started.has(f.id) && (
-                    <div className="absolute inset-x-0 bottom-0 h-1 overflow-hidden bg-accent/15">
-                      <div className="dl-sweep h-full w-2/5 rounded-full bg-accent" />
+                  {dl ? (
+                    <div className="mt-auto w-full">
+                      <div className="h-1.5 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+                        <div className="h-full rounded-full bg-accent transition-[width] duration-200" style={{ width: `${dl.progress}%` }} />
+                      </div>
+                      <div className="mt-1 flex items-center justify-between gap-1">
+                        <span className="text-[11px] font-medium tabular-nums text-zinc-600 dark:text-zinc-300">
+                          Downloading {dl.progress}%
+                        </span>
+                        <button
+                          type="button"
+                          onClick={dl.abort}
+                          title="Cancel download"
+                          className="rounded p-0.5 text-zinc-400 transition hover:bg-zinc-200 hover:text-red-500 dark:hover:bg-zinc-800"
+                        >
+                          <X size={12} />
+                        </button>
+                      </div>
+                      <p className="truncate text-[10px] tabular-nums text-zinc-400">{fmtSpeed(dl.speedBps)}</p>
+                    </div>
+                  ) : (
+                    <div className="mt-auto flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => void downloadFile(f)}
+                        title="Download"
+                        className="btn"
+                      >
+                        <Download size={16} />
+                      </button>
+                      <button className="btn" title="Details" onClick={() => openDetail(f)}><Info size={16} /></button>
+                      <button className="btn" title="Rename" onClick={() => setRenaming(f)}><Pencil size={16} /></button>
+                      {isText(f.name) && (
+                        <button className="btn" title="Save to Notes" onClick={() => importToNotes(f)}><NotebookPen size={16} /></button>
+                      )}
+                      <button className="btn hover:!text-red-500" title="Delete" onClick={() => removeMany([f])}><Trash2 size={16} /></button>
                     </div>
                   )}
                 </div>

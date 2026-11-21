@@ -202,6 +202,28 @@ export const driveStore: Store = {
     infoCache = { mode: "drive" as const, account, path: `My Drive / ${root} / files` };
     return infoCache;
   },
+  async getDownloadSession(id) {
+    const { files } = await folders();
+    try {
+      const m = await client().files.get({
+        fileId: id,
+        fields: "name,size,mimeType,parents,trashed",
+      });
+      if (m.data.trashed || !m.data.parents?.includes(files)) return null;
+      const { token } = await authClient().getAccessToken();
+      if (!token) return null;
+      return {
+        mode: "direct" as const,
+        url: `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?alt=media`,
+        token,
+        name: m.data.name ?? "file",
+        size: Number(m.data.size ?? 0),
+        mime: m.data.mimeType ?? "application/octet-stream",
+      };
+    } catch {
+      return null;
+    }
+  },
   async getFile(id) {
     const { files } = await folders();
     try {
