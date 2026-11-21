@@ -139,7 +139,7 @@ export default function LockScreen({
         onSubmit={(e) => { e.preventDefault(); if (code) submit(code); }}
         className={`my-auto w-full max-w-sm text-center ${leaving ? "anim-out" : "anim-in"}`}
       >
-        <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-2xl bg-zinc-100/80 shadow-sm dark:bg-zinc-800/80">
+        <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-2xl border border-zinc-200/70 bg-zinc-100/90 dark:border-zinc-700/50 dark:bg-zinc-800/90">
           <BrandIcon size={46} />
         </div>
         <h1 className="text-2xl font-semibold tracking-tight">NoDistanceNote</h1>
